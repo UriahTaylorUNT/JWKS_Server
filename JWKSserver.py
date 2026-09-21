@@ -29,5 +29,42 @@ class BestServer(BaseHTTPRequestHandler):
             		query_params = parse_qs(parsed_path.query)
             		expired = 'expired' in query_params
 
+			target_kid = None
+			for kid, key_data in keys.items():
+                		is_expired = key_data["expiry"] < time.time()
+                		if expired and is_expired:
+                    			target_kid = kid
+                    			break
+                		elif not expired and not is_expired:
+                    			target_kid = kid
+                    			break
+			if not target_kid:
+                		private_key = rsa.generate_private_key(public_exponent=65537,key_size=2048,backend=default_backend())
+                		target_kid = str(uuid.uuid4())
+                		expiry = int(time.time()) - 3600 if expired else int(time.time()) + 3600
+                		keys[target_kid] = {"private_key": private_key,"expiry": expiry}
+            		else:
+                		private_key = keys[target_kid]["private_key"]
+
+            		headers = {"kid": target_kid}
+            		payload = {"user": "fake_user","exp": keys[target_kid]["expiry"]}
+
+			encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256", headers=headers)
+            		self.send_response(200)
+            		self.send_header("Content-type", "application/json")
+            		self.end_headers()
+            		self.wfile.write(bytes(json.dumps({"token": encoded_jwt}), "utf-8"))
+            		return
+		self.send_response(405)
+        	self.end_headers()
+        	return
+
 	def doGet(self):
 		parsed_path = urlparse(self.path)
+		if parsed_path.path == "/.well-known/jwks.json":
+            	jwks = {"keys": []}
+            	for kid, key_data in keys.items():
+                	if key_data["expiry"] > time.time():
+                    		private_key = key_data["private_key"]
+                    		public_key = private_key.public_key()
+                    		public_numbers = public_key.public_numbers()
