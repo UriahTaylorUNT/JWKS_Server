@@ -68,3 +68,26 @@ class BestServer(BaseHTTPRequestHandler):
                     		private_key = key_data["private_key"]
                     		public_key = private_key.public_key()
                     		public_numbers = public_key.public_numbers()
+
+				jwks["keys"].append({
+                        		"alg": "RS256",
+                        		"kty": "RSA",
+                        		"use": "sig",
+                        		"kid": kid,
+                        		"n": int_to_base64(public_numbers.n),
+                        		"e": int_to_base64(public_numbers.e)
+                    		})
+
+			self.send_response(200)
+            		self.send_header("Content-type", "application/json")
+            		self.end_headers()
+            		self.wfile.write(bytes(json.dumps(jwks), "utf-8"))
+            		return
+
+		self.send_response(405)
+		self.end_headers()
+		return
+
+
+if __name__ == "__main__":
+	#Pre-populate kets
