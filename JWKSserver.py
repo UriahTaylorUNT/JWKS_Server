@@ -28,7 +28,7 @@ class BestServer(BaseHTTPRequestHandler):
 		if parsed_path.path == "/auth":
             		query_params = parse_qs(parsed_path.query)
             		expired = 'expired' in query_params
-			
+
 			#Select key that matches requirement
 			target_kid = None
 			for kid, key_data in keys.items():
@@ -109,26 +109,6 @@ if __name__ == "__main__":
         	pass
     	webServer.server_close()
     	print("Server stopped.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
