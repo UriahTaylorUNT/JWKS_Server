@@ -28,7 +28,8 @@ class BestServer(BaseHTTPRequestHandler):
 		if parsed_path.path == "/auth":
             		query_params = parse_qs(parsed_path.query)
             		expired = 'expired' in query_params
-
+			
+			#Select key that matches requirement
 			target_kid = None
 			for kid, key_data in keys.items():
                 		is_expired = key_data["expiry"] < time.time()
@@ -38,6 +39,8 @@ class BestServer(BaseHTTPRequestHandler):
                 		elif not expired and not is_expired:
                     			target_kid = kid
                     			break
+
+			#If no match is found, generate new key
 			if not target_kid:
                 		private_key = rsa.generate_private_key(public_exponent=65537,key_size=2048,backend=default_backend())
                 		target_kid = str(uuid.uuid4())
@@ -55,6 +58,7 @@ class BestServer(BaseHTTPRequestHandler):
             		self.end_headers()
             		self.wfile.write(bytes(json.dumps({"token": encoded_jwt}), "utf-8"))
             		return
+
 		self.send_response(405)
         	self.end_headers()
         	return
@@ -90,4 +94,41 @@ class BestServer(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-	#Pre-populate kets
+	#Pre-populate keys
+	good_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    	keys["goodKID"] = {"private_key": good_key, "expiry": int(time.time()) + 3600}
+
+    	expired_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    	keys["expiredKID"] = {"private_key": expired_key, "expiry": int(time.time()) - 3600}
+
+    	webServer = HTTPServer((hostName, serverPort), BestServer)
+    	print(f"Server started on http://{hostName}:{serverPort}")
+	try:
+        	webServer.serve_forever()
+    	except KeyboardInterrupt:
+        	pass
+    	webServer.server_close()
+    	print("Server stopped.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
