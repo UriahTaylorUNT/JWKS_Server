@@ -185,6 +185,5 @@ if __name__ == "__main__":
         pass
     webServer.server_close()
     print("Server stopped.")    
-    pem = private_key.private_bytes(encoding=serialization.Encoding.PEM,)
 
 
