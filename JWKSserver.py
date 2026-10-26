@@ -22,6 +22,23 @@ def int_to_base64(value):
     encoded = base64.urlsafe_b64encode(value_bytes).rstrip(b'=')
     return encoded.decode('utf-8')
 
+def generate_and_save_key(exp_timestamp):
+    """Generate an RSA private key, serialize to PEM, and save to SQLite."""
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL, 
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO keys (key, exp) VALUES (?, ?)", (pem, exp_timestamp))
+    conn.commit()
+    conn.close()
 
 def init_db():
     """Create the SQLite database table and populate initial keys."""
@@ -170,21 +187,4 @@ if __name__ == "__main__":
     print("Server stopped.")    
     pem = private_key.private_bytes(encoding=serialization.Encoding.PEM,)
 
-def generate_and_save_key(exp_timestamp):
-    """Generate an RSA private key, serialize to PEM, and save to SQLite."""
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048
-    )
-    pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL, 
-        encryption_algorithm=serialization.NoEncryption()
-    )
-
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO keys (key, exp) VALUES (?, ?)", (pem, exp_timestamp))
-    conn.commit()
-    conn.close()
 
