@@ -37,24 +37,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-    # Generate and store at least one expired key and one valid key
+    #Generate and store at least one expired key and one valid key
     now = int(time.time())
-    generate_and_save_key(now - 3600)  # Expired 1 hour ago
-    generate_and_save_key(now + 3600)  # Expires in 1 hour
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048
-        format=serialization.PrivateFormat.TraditionalOpenSSL,  # PKCS1 PEM format
-        encryption_algorithm=serialization.NoEncryption()
-    )
-
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    # Use '?' parameterized query to prevent SQL injection
-    cursor.execute("INSERT INTO keys (key, exp) VALUES (?, ?)", (pem, exp_timestamp))
-    conn.commit()
-    conn.close()
-
+    generate_and_save_key(now - 3600)  #Expired 1 hour ago
+    generate_and_save_key(now + 3600)  #1 hour expiration
 
 def get_key_from_db(expired=False):
     """Fetch a single expired or unexpired key from the database."""
@@ -181,10 +167,24 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     webServer.server_close()
-    print("Server stopped.")    )
-    pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
+    print("Server stopped.")    
+    pem = private_key.private_bytes(encoding=serialization.Encoding.PEM,)
 
 def generate_and_save_key(exp_timestamp):
     """Generate an RSA private key, serialize to PEM, and save to SQLite."""
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL, 
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO keys (key, exp) VALUES (?, ?)", (pem, exp_timestamp))
+    conn.commit()
+    conn.close()
 

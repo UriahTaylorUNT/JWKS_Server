@@ -5,7 +5,7 @@ import time
 import jwt
 import pytest
 import requests
-from server import MyServer, HTTPServer, init_db, db_file
+from JWKSserver import MyServer, HTTPServer, init_db, db_file
 
 
 @pytest.fixture(scope="module")
