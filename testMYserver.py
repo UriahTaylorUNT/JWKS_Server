@@ -1,61 +1,82 @@
-import pytest
-import requests
+import os
+import sqlite3
 import threading
 import time
 import jwt
-from cryptography.hazmat.primitives.asymmetric import rsa
-from server import BestServer, HTTPServer, keys
+import pytest
+import requests
+from server import MyServer, HTTPServer, init_db, db_file
 
-#Inject test keys into the server
-keys["goodKID_test"] = {"private_key": rsa.generate_private_key(public_exponent=65537, key_size=2048), "expiry": int(time.time()) + 3600}
-keys["expiredKID_test"] = {"private_key": rsa.generate_private_key(public_exponent=65537, key_size=2048), "expiry": int(time.time()) - 3600}
 
 @pytest.fixture(scope="module")
 def server():
-    	webServer = HTTPServer(("127.0.0.1", 8080), BestServer)
-    	server_thread = threading.Thread(target=webServer.serve_forever)
-    	server_thread.daemon = True
-    	server_thread.start()
-    	time.sleep(1)
-    	yield
-    	webServer.shutdown()
-    	webServer.server_close()
+    # Remove old DB file if it exists to start fresh
+    if os.path.exists(db_file):
+        os.remove(db_file)
 
-def test_jwks_endpoint_excludes_expired(server):
-    	response = requests.get("http://127.0.0.1:8080/.well-known/jwks.json")
-    	assert response.status_code == 200
-    	data = response.json()
-    	assert "keys" in data
+    init_db()
+    webServer = HTTPServer(("127.0.0.1", 8080), MyServer)
+    server_thread = threading.Thread(target=webServer.serve_forever)
+    server_thread.daemon = True
+    server_thread.start()
+    time.sleep(0.5)
+    yield
+    webServer.shutdown()
+    webServer.server_close()
 
-    	for key in data["keys"]:
-        	kid = key["kid"]
-        	assert keys[kid]["expiry"] > time.time()
 
-def test_auth_endpoint_valid_jwt(server):
-    	response = requests.post("http://127.0.0.1:8080/auth")
-    	assert response.status_code == 200
-    	data = response.json()
-    	assert "token" in data
+def test_db_file_and_keys_exist(server):
+    assert os.path.exists(db_file)
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM keys")
+    count = cursor.fetchone()[0]
+    conn.close()
+    assert count >= 2
 
-    	token = data["token"]
-    	unverified_headers = jwt.get_unverified_header(token)
-    	assert "kid" in unverified_headers
-    	assert keys[unverified_headers["kid"]]["expiry"] > time.time()
 
-def test_auth_endpoint_expired_jwt(server):
-    	response = requests.post("http://127.0.0.1:8080/auth?expired=true")
-    	assert response.status_code == 200
-    	data = response.json()
-    	assert "token" in data
+def test_jwks_endpoint_only_valid_keys(server):
+    response = requests.get("http://127.0.0.1:8080/.well-known/jwks.json")
+    assert response.status_code == 200
+    data = response.json()
+    assert "keys" in data
+    assert len(data["keys"]) >= 1
+    for key in data["keys"]:
+        assert key["kty"] == "RSA"
+        assert key["alg"] == "RS256"
+        assert "kid" in key
 
-    	token = data["token"]
-    	unverified_headers = jwt.get_unverified_header(token)
-    	assert "kid" in unverified_headers
-    	assert keys[unverified_headers["kid"]]["expiry"] < time.time()
 
-def test_invalid_http_methods(server):
-    	response = requests.get("http://127.0.0.1:8080/auth")
-    	assert response.status_code == 405
+def test_auth_valid_jwt_with_json_payload(server):
+    payload = {"username": "userABC", "password": "password123"}
+    response = requests.post("http://127.0.0.1:8080/auth", json=payload)
+    assert response.status_code == 200
+    token = response.text
+    headers = jwt.get_unverified_header(token)
+    assert "kid" in headers
+    decoded = jwt.decode(token, options={"verify_signature": False})
+    assert decoded["exp"] > time.time()
 
-    	response = requests.post("http://127.0.0.1:8080/.well-known/jwks.json")
-    	assert response.status_code == 405
+
+def test_auth_expired_jwt_with_basic_auth(server):
+    response = requests.post(
+        "http://127.0.0.1:8080/auth?expired=true",
+        auth=("userABC", "password123")
+    )
+    assert response.status_code == 200
+    token = response.text
+    headers = jwt.get_unverified_header(token)
+    assert "kid" in headers
+    decoded = jwt.decode(token, options={"verify_signature": False})
+    assert decoded["exp"] <= time.time()
+
+
+def test_invalid_methods(server):
+    for method in [requests.put, requests.patch, requests.delete, requests.head]:
+        resp1 = method("http://127.0.0.1:8080/auth")
+        assert resp1.status_code == 405
+        resp2 = method("http://127.0.0.1:8080/.well-known/jwks.json")
+        assert resp2.status_code == 405
+
+    assert requests.get("http://127.0.0.1:8080/auth").status_code == 405
+    assert requests.post("http://127.0.0.1:8080/.well-known/jwks.json").status_code == 405

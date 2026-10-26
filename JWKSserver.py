@@ -1,83 +1,163 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.backends import default_backend
-import jwt
-import json
-import time
-import base64
 from urllib.parse import urlparse, parse_qs
-import uuid
+import base64
+import json
+import jwt
+import sqlite3
+import time
 
 hostName = "127.0.0.1"
 serverPort = 8080
+db_file = "totally_not_my_privateKeys.db"
 
-#Storing keys and their expiration timestamps
-keys = {}
 
 def int_to_base64(value):
-        value_hex = format(value, 'x')
-        if len(value_hex) % 2 == 1:
-            value_hex = '0' + value_hex
-        value_bytes = bytes.fromhex(value_hex)
-        encoded = base64.urlsafe_b64encode(value_bytes).rstrip(b'=')
-        return encoded.decode('utf-8')
+    """Convert an integer to a Base64URL-encoded string."""
+    value_hex = format(value, 'x')
+    if len(value_hex) % 2 == 1:
+        value_hex = '0' + value_hex
+    value_bytes = bytes.fromhex(value_hex)
+    encoded = base64.urlsafe_b64encode(value_bytes).rstrip(b'=')
+    return encoded.decode('utf-8')
 
-class BestServer(BaseHTTPRequestHandler):
+
+def init_db():
+    """Create the SQLite database table and populate initial keys."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS keys(
+            kid INTEGER PRIMARY KEY AUTOINCREMENT,
+            key BLOB NOT NULL,
+            exp INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    # Generate and store at least one expired key and one valid key
+    now = int(time.time())
+    generate_and_save_key(now - 3600)  # Expired 1 hour ago
+    generate_and_save_key(now + 3600)  # Expires in 1 hour
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+        format=serialization.PrivateFormat.TraditionalOpenSSL,  # PKCS1 PEM format
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    # Use '?' parameterized query to prevent SQL injection
+    cursor.execute("INSERT INTO keys (key, exp) VALUES (?, ?)", (pem, exp_timestamp))
+    conn.commit()
+    conn.close()
+
+
+def get_key_from_db(expired=False):
+    """Fetch a single expired or unexpired key from the database."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    now = int(time.time())
+
+    if expired:
+        cursor.execute("SELECT kid, key, exp FROM keys WHERE exp <= ? LIMIT 1", (now,))
+    else:
+        cursor.execute("SELECT kid, key, exp FROM keys WHERE exp > ? LIMIT 1", (now,))
+
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def get_all_valid_keys():
+    """Fetch all unexpired keys from the database."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    now = int(time.time())
+    cursor.execute("SELECT kid, key, exp FROM keys WHERE exp > ?", (now,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+class MyServer(BaseHTTPRequestHandler):
+    def do_PUT(self):
+        self.send_response(405)
+        self.end_headers()
+
+    def do_PATCH(self):
+        self.send_response(405)
+        self.end_headers()
+
+    def do_DELETE(self):
+        self.send_response(405)
+        self.end_headers()
+
+    def do_HEAD(self):
+        self.send_response(405)
+        self.end_headers()
+
     def do_POST(self):
         parsed_path = urlparse(self.path)
         if parsed_path.path == "/auth":
+            # Read request body if present (Gradebot sends JSON or Basic Auth)
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 0:
+                _ = self.rfile.read(content_length)
+
             query_params = parse_qs(parsed_path.query)
             expired = 'expired' in query_params
 
-            #Select key that matches requirement
-            target_kid = None
-            for kid, key_data in keys.items():
-                is_expired = key_data["expiry"] < time.time()
-                if expired and is_expired:
-                    target_kid = kid
-                    break
-                elif not expired and not is_expired:
-                    target_kid = kid
-                    break
+            row = get_key_from_db(expired=expired)
+            if not row:
+                self.send_response(500)
+                self.end_headers()
+                return
 
-            #If no match is found, generate new key
-            if not target_kid:
-                private_key = rsa.generate_private_key(public_exponent=65537,key_size=2048,backend=default_backend())
-                target_kid = str(uuid.uuid4())
-                expiry = int(time.time()) - 3600 if expired else int(time.time()) + 3600
-                keys[target_kid] = {"private_key": private_key,"expiry": expiry}
-            else:
-                private_key = keys[target_kid]["private_key"]
+            kid, pem_data, exp = row
+            if isinstance(pem_data, str):
+                pem_data = pem_data.encode('utf-8')
 
-            headers = {"kid": target_kid}
-            payload = {"user": "fake_user","exp": keys[target_kid]["expiry"]}
+            private_key = serialization.load_pem_private_key(pem_data, password=None)
+
+            headers = {"kid": str(kid)}
+            payload = {
+                "user": "userABC",
+                "exp": exp
+            }
 
             encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256", headers=headers)
+
             self.send_response(200)
-            self.send_header("Content-type", "application/json")
+            self.send_header("Content-type", "application/txt")
             self.end_headers()
-            self.wfile.write(bytes(json.dumps({"token": encoded_jwt}), "utf-8"))
+            self.wfile.write(bytes(encoded_jwt, "utf-8"))
             return
 
         self.send_response(405)
         self.end_headers()
-        return
 
     def do_GET(self):
         parsed_path = urlparse(self.path)
         if parsed_path.path == "/.well-known/jwks.json":
+            rows = get_all_valid_keys()
             jwks = {"keys": []}
-            for kid, key_data in keys.items():
-                if key_data["expiry"] > time.time():
-                    private_key = key_data["private_key"]
-                    public_key = private_key.public_key()
-                    public_numbers = public_key.public_numbers()
+
+            for kid, pem_data, _ in rows:
+                if isinstance(pem_data, str):
+                    pem_data = pem_data.encode('utf-8')
+
+                private_key = serialization.load_pem_private_key(pem_data, password=None)
+                public_numbers = private_key.public_key().public_numbers()
 
                 jwks["keys"].append({
                     "alg": "RS256",
                     "kty": "RSA",
                     "use": "sig",
-                    "kid": kid,
+                    "kid": str(kid),
                     "n": int_to_base64(public_numbers.n),
                     "e": int_to_base64(public_numbers.e)
                 })
@@ -90,45 +170,21 @@ class BestServer(BaseHTTPRequestHandler):
 
         self.send_response(405)
         self.end_headers()
-        return
-
-    def do_PUT(self):
-        self.send_response(405)
-        self.end_headers()
-        return
-
-    def do_PATCH(self):
-        self.send_response(405)
-        self.end_headers()
-        return
-
-    def do_DELETE(self):
-        self.send_response(405)
-        self.end_headers()
-        return
-
-    def do_HEAD(self):
-        self.send_response(405)
-        self.end_headers()
-        return
 
 
 if __name__ == "__main__":
-    #Pre-populate keys
-    good_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    keys["goodKID"] = {"private_key": good_key, "expiry": int(time.time()) + 3600}
-
-    expired_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    keys["expiredKID"] = {"private_key": expired_key, "expiry": int(time.time()) - 3600}
-
-    webServer = HTTPServer((hostName, serverPort), BestServer)
+    init_db()
+    webServer = HTTPServer((hostName, serverPort), MyServer)
     print(f"Server started on http://{hostName}:{serverPort}")
     try:
         webServer.serve_forever()
     except KeyboardInterrupt:
         pass
     webServer.server_close()
-    print("Server stopped.")
+    print("Server stopped.")    )
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
 
-
+def generate_and_save_key(exp_timestamp):
+    """Generate an RSA private key, serialize to PEM, and save to SQLite."""
 
