@@ -85,7 +85,7 @@ rate_limiter = RateLimiter(max_requests=10, window_seconds=1.0)
 class DatabaseManager:
     """Handles all SQLite database connections and parameterized queries."""
 
-    def __init__(self, db_path: str = DB_FILE):
+    def __init__(self, db_path: str = db_file):
         self.db_path = db_path
 
     def _connect(self) -> sqlite3.Connection:
@@ -147,12 +147,58 @@ class DatabaseManager:
             )
             conn.commit()
 
+    def get_key(self, expired: bool = False):
+        """Fetch one expired or valid key row from the database."""
+        now = int(time.time())
+        query = (
+            "SELECT kid, key, exp FROM keys WHERE exp <= ? LIMIT 1"
+            if expired
+            else "SELECT kid, key, exp FROM keys WHERE exp > ? LIMIT 1"
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(query, (now,))
+            return cursor.fetchone()
 
-def get_key_from_db(expired=False):
-#stuff
+    def get_all_valid_keys(self):
+	"""Fetch all unexpired key rows from the database."""
+        now = int(time.time())
+        with self._connect() as conn:
+            cursor = conn.execute("SELECT kid, key, exp FROM keys WHERE exp > ?", (now,))
+            return cursor.fetchall()
 
-def get_all_valid_keys(self):
-#stuff
+    def create_user(self, username: str, password_hash: str, email: str) -> int:
+        """Insert a new user into the users table and return the new user ID."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)",
+                (username, password_hash, email)
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_user_id_by_username(self, username: str):
+        """Look up a user's ID by username, returning None if not found."""
+        if not username:
+            return None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT id FROM users WHERE username = ?",
+                (username,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def log_auth_request(self, request_ip: str, user_id) -> None:
+        """Record a successful authentication request in auth_logs."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO auth_logs (request_ip, user_id) VALUES (?, ?)",
+                (request_ip, user_id)
+            )
+            conn.commit()
+
+db = DatabaseManager(db_file)
+
 
 class MyServer(BaseHTTPRequestHandler):
     def do_PUT(self):
@@ -217,10 +263,8 @@ class MyServer(BaseHTTPRequestHandler):
             rows = get_all_valid_keys()
             jwks = {"keys": []}
 
-            for kid, pem_data, _ in rows:
-                if isinstance(pem_data, str):
-                    pem_data = pem_data.encode('utf-8')
-
+            for kid, encrypted_blob, _ in rows:
+                pem_bytes = decrypt_private_key(encrypted_blob)
                 private_key = serialization.load_pem_private_key(pem_data, password=None)
                 public_numbers = private_key.public_key().public_numbers()
 
@@ -244,7 +288,7 @@ class MyServer(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    init_db()
+    db.init_db()
     webServer = HTTPServer((hostName, serverPort), MyServer)
     print(f"Server started on http://{hostName}:{serverPort}")
     try:
@@ -252,6 +296,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     webServer.server_close()
-    print("Server stopped.")    
+    print("Server stopped.")
 
 
