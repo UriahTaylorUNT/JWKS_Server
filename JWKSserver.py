@@ -1,17 +1,25 @@
+from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 from urllib.parse import urlparse, parse_qs
 import base64
+import hashlib
 import json
-import jwt
+import os
 import sqlite3
+import threading
 import time
+import uuid
+from argon2 import PasswordHasher
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import jwt
 
 hostName = "127.0.0.1"
 serverPort = 8080
 db_file = "totally_not_my_privateKeys.db"
 
+password_hasher = PasswordHasher()
 
 def int_to_base64(value):
     """Convert an integer to a Base64URL-encoded string."""
@@ -22,69 +30,129 @@ def int_to_base64(value):
     encoded = base64.urlsafe_b64encode(value_bytes).rstrip(b'=')
     return encoded.decode('utf-8')
 
-def generate_and_save_key(exp_timestamp):
-    """Generate an RSA private key, serialize to PEM, and save to SQLite."""
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048
-    )
-    pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL, 
-        encryption_algorithm=serialization.NoEncryption()
-    )
 
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO keys (key, exp) VALUES (?, ?)", (pem, exp_timestamp))
-    conn.commit()
-    conn.close()
+def get_aes_key() -> bytes:
+    """Derive a 32-byte AES-256 key from the NOT_MY_KEY environment variable."""
+    raw_key = os.environ.get("NOT_MY_KEY")
+    if not raw_key:
+        raise EnvironmentError("NOT_MY_KEY environment variable is not set.")
+    return hashlib.sha256(raw_key.encode("utf-8")).digest()
 
-def init_db():
-    """Create the SQLite database table and populate initial keys."""
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS keys(
-            kid INTEGER PRIMARY KEY AUTOINCREMENT,
-            key BLOB NOT NULL,
-            exp INTEGER NOT NULL
+
+def encrypt_private_key(pem_bytes: bytes) -> bytes:
+    """Encrypt PEM key bytes using AES-256-GCM with a random 12-byte nonce."""
+    aesgcm = AESGCM(get_aes_key())
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, pem_bytes, None)
+    return nonce + ciphertext
+
+
+def decrypt_private_key(encrypted_blob: bytes) -> bytes:
+    """Decrypt an AES-256-GCM encrypted key BLOB back to PEM bytes."""
+    aesgcm = AESGCM(get_aes_key())
+    nonce = encrypted_blob[:12]
+    ciphertext = encrypted_blob[12:]
+    return aesgcm.decrypt(nonce, ciphertext, None)
+
+
+class RateLimiter:
+    """Thread-safe rate limiter with slideing window"""
+    def __init__(self, max_requests: int = 10, window_seconds: float = 1.0):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.timestamps = deque()
+        self.lock = threading.Lock()
+
+    def allow_request(self) -> bool:
+        """Return True if the request is within the rate limit, False otherwise."""
+        now = time.monotonic()
+        with self.lock:
+            while self.timestamps and (now - self.timestamps[0]) >= self.window_seconds:
+                self.timestamps.popleft()
+            if len(self.timestamps) >= self.max_requests:
+                return False
+            self.timestamps.append(now)
+            return True
+
+    def reset(self) -> None:
+        """Clear recorded request timestamps."""
+        with self.lock:
+            self.timestamps.clear()
+
+rate_limiter = RateLimiter(max_requests=10, window_seconds=1.0)
+
+
+class DatabaseManager:
+    """Handles all SQLite database connections and parameterized queries."""
+
+    def __init__(self, db_path: str = DB_FILE):
+        self.db_path = db_path
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path)
+
+    def init_db(self) -> None:
+        """Create required tables and seed one expired and one valid RSA key."""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS keys(
+                    kid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key BLOB NOT NULL,
+                    exp INTEGER NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    email TEXT UNIQUE,
+                    date_registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_login TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS auth_logs(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_ip TEXT NOT NULL,
+                    request_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    user_id INTEGER,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            """)
+            conn.commit()
+
+        now = int(time.time())
+        self.generate_and_save_key(now - 3600)  #Expired 1 hour ago
+        self.generate_and_save_key(now + 3600)  #Expires in 1 hour
+
+    def generate_and_save_key(self, exp_timestamp: int) -> None:
+	"""Generate an RSA key, encrypt it with AES, and store it in SQLite."""
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048
         )
-    """)
-    conn.commit()
-    conn.close()
+        pem_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        encrypted_blob = encrypt_private_key(pem_bytes)
 
-    #Generate and store at least one expired key and one valid key
-    now = int(time.time())
-    generate_and_save_key(now - 3600)  #Expired 1 hour ago
-    generate_and_save_key(now + 3600)  #1 hour expiration
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO keys (key, exp) VALUES (?, ?)",
+                (encrypted_blob, exp_timestamp)
+            )
+            conn.commit()
+
 
 def get_key_from_db(expired=False):
-    """Fetch a single expired or unexpired key from the database."""
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    now = int(time.time())
+#stuff
 
-    if expired:
-        cursor.execute("SELECT kid, key, exp FROM keys WHERE exp <= ? LIMIT 1", (now,))
-    else:
-        cursor.execute("SELECT kid, key, exp FROM keys WHERE exp > ? LIMIT 1", (now,))
-
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-
-def get_all_valid_keys():
-    """Fetch all unexpired keys from the database."""
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    now = int(time.time())
-    cursor.execute("SELECT kid, key, exp FROM keys WHERE exp > ?", (now,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
+def get_all_valid_keys(self):
+#stuff
 
 class MyServer(BaseHTTPRequestHandler):
     def do_PUT(self):
