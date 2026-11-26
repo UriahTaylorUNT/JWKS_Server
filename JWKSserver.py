@@ -15,9 +15,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import jwt
 
-hostName = "127.0.0.1"
-serverPort = 8080
-db_file = "totally_not_my_privateKeys.db"
+HOST_NAME = "127.0.0.1"
+SERVER_PORT = 8080
+DB_FILE = "totally_not_my_privateKeys.db"
 
 password_hasher = PasswordHasher()
 
@@ -85,7 +85,7 @@ rate_limiter = RateLimiter(max_requests=10, window_seconds=1.0)
 class DatabaseManager:
     """Handles all SQLite database connections and parameterized queries."""
 
-    def __init__(self, db_path: str = db_file):
+    def __init__(self, db_path: str = DB_FILE):
         self.db_path = db_path
 
     def _connect(self) -> sqlite3.Connection:
@@ -128,7 +128,7 @@ class DatabaseManager:
         self.generate_and_save_key(now + 3600)  #Expires in 1 hour
 
     def generate_and_save_key(self, exp_timestamp: int) -> None:
-	"""Generate an RSA key, encrypt it with AES, and store it in SQLite."""
+        """Generate an RSA key, encrypt it with AES, and store it in SQLite."""
         private_key = rsa.generate_private_key(
             public_exponent=65537,
             key_size=2048
@@ -160,7 +160,7 @@ class DatabaseManager:
             return cursor.fetchone()
 
     def get_all_valid_keys(self):
-	"""Fetch all unexpired key rows from the database."""
+        """Fetch all unexpired key rows from the database."""
         now = int(time.time())
         with self._connect() as conn:
             cursor = conn.execute("SELECT kid, key, exp FROM keys WHERE exp > ?", (now,))
@@ -197,7 +197,7 @@ class DatabaseManager:
             )
             conn.commit()
 
-db = DatabaseManager(db_file)
+db = DatabaseManager(DB_FILE)
 
 
 class MyServer(BaseHTTPRequestHandler):
@@ -253,7 +253,7 @@ class MyServer(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-	plain_password = str(uuid.uuid4())
+        plain_password = str(uuid.uuid4())
         hashed_password = password_hasher.hash(plain_password)
 
         try:
@@ -263,7 +263,7 @@ class MyServer(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-	response_payload = json.dumps({"password": plain_password}).encode("utf-8")
+        response_payload = json.dumps({"password": plain_password}).encode("utf-8")
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -305,7 +305,7 @@ class MyServer(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed_path = urlparse(self.path)
-	if parsed_path.path == "/register":
+        if parsed_path.path == "/register":
             self._handle_register()
             return
         if parsed_path.path == "/auth":
@@ -347,8 +347,8 @@ class MyServer(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     db.init_db()
-    webServer = HTTPServer((hostName, serverPort), MyServer)
-    print(f"Server started on http://{hostName}:{serverPort}")
+    webServer = HTTPServer((HOST_NAME, SERVER_PORT), MyServer)
+    print(f"Server started on http://{HOST_NAME}:{SERVER_PORT}")
     try:
         webServer.serve_forever()
     except KeyboardInterrupt:
