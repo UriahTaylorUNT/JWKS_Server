@@ -217,41 +217,99 @@ class MyServer(BaseHTTPRequestHandler):
         self.send_response(405)
         self.end_headers()
 
+    def _read_json_body(self) -> dict:
+        """Read and parse a JSON request body if present."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length <= 0:
+            return {}
+        raw_body = self.rfile.read(content_length)
+        try:
+            return json.loads(raw_body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return {}
+
+    def _extract_username(self, body: dict):
+        """Extract username from JSON payload or HTTP Basic Auth header."""
+        if isinstance(body, dict) and body.get("username"):
+            return body.get("username")
+
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                return decoded.split(":", 1)[0]
+            except (ValueError, UnicodeDecodeError):
+                return None
+        return None
+
+    def _handle_register(self):
+        """Handle POST /register requests."""
+        body = self._read_json_body()
+        username = body.get("username")
+        email = body.get("email")
+
+        if not username:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+	plain_password = str(uuid.uuid4())
+        hashed_password = password_hasher.hash(plain_password)
+
+        try:
+            db.create_user(username, hashed_password, email)
+        except sqlite3.IntegrityError:
+            self.send_response(409)
+            self.end_headers()
+            return
+
+	response_payload = json.dumps({"password": plain_password}).encode("utf-8")
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(response_payload)
+
+    def _handle_auth(self, parsed_path):
+        """Handle POST /auth requests with rate limiting and auth logging."""
+        if not rate_limiter.allow_request():
+            self.send_response(429)
+            self.end_headers()
+            return
+
+        body = self._read_json_body()
+        username = self._extract_username(body) or "userABC"
+        query_params = parse_qs(parsed_path.query)
+        expired = "expired" in query_params
+
+        row = db.get_key(expired=expired)
+        if not row:
+            self.send_response(500)
+            self.end_headers()
+            return
+
+        kid, encrypted_blob, exp = row
+        pem_bytes = decrypt_private_key(encrypted_blob)
+        private_key = serialization.load_pem_private_key(pem_bytes, password=None)
+
+        headers = {"kid": str(kid)}
+        payload = {"user": username, "exp": exp}
+        encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256", headers=headers)
+
+        user_id = db.get_user_id_by_username(username)
+        db.log_auth_request(self.client_address[0], user_id)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(encoded_jwt.encode("utf-8"))
+
     def do_POST(self):
         parsed_path = urlparse(self.path)
+	if parsed_path.path == "/register":
+            self._handle_register()
+            return
         if parsed_path.path == "/auth":
-            # Read request body if present (Gradebot sends JSON or Basic Auth)
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length > 0:
-                _ = self.rfile.read(content_length)
-
-            query_params = parse_qs(parsed_path.query)
-            expired = 'expired' in query_params
-
-            row = get_key_from_db(expired=expired)
-            if not row:
-                self.send_response(500)
-                self.end_headers()
-                return
-
-            kid, pem_data, exp = row
-            if isinstance(pem_data, str):
-                pem_data = pem_data.encode('utf-8')
-
-            private_key = serialization.load_pem_private_key(pem_data, password=None)
-
-            headers = {"kid": str(kid)}
-            payload = {
-                "user": "userABC",
-                "exp": exp
-            }
-
-            encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256", headers=headers)
-
-            self.send_response(200)
-            self.send_header("Content-type", "application/txt")
-            self.end_headers()
-            self.wfile.write(bytes(encoded_jwt, "utf-8"))
+            self._handle_auth(parsed_path)
             return
 
         self.send_response(405)

@@ -2,10 +2,14 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 import jwt
 import pytest
 import requests
-from JWKSserver import MyServer, HTTPServer, init_db, db_file
+
+from JWKSserver import db_file, MyServer, HTTPServer, db, decrypt_private_key, rate_limiter
+
+BASE_URL = "http://127.0.0.1:8000"
 
 
 @pytest.fixture(scope="module")
