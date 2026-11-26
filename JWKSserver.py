@@ -323,7 +323,7 @@ class MyServer(BaseHTTPRequestHandler):
 
             for kid, encrypted_blob, _ in rows:
                 pem_bytes = decrypt_private_key(encrypted_blob)
-                private_key = serialization.load_pem_private_key(pem_data, password=None)
+                private_key = serialization.load_pem_private_key(pem_bytes, password=None)
                 public_numbers = private_key.public_key().public_numbers()
 
                 jwks["keys"].append({
