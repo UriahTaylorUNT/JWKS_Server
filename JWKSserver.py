@@ -318,7 +318,7 @@ class MyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_path = urlparse(self.path)
         if parsed_path.path == "/.well-known/jwks.json":
-            rows = get_all_valid_keys()
+            rows = db.get_all_valid_keys()
             jwks = {"keys": []}
 
             for kid, encrypted_blob, _ in rows:

@@ -11,7 +11,7 @@ from JWKSserver import DB_FILE, MyServer, HTTPServer, db, decrypt_private_key, r
 
 os.environ["NOT_MY_KEY"] = "pytest_temporary_aes_secret_key"
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "http://127.0.0.1:8080"
 
 
 @pytest.fixture(scope="module")
@@ -23,8 +23,8 @@ def server():
     rate_limiter.reset()
     db.init_db()
 
-    web_server = HTTPServer(("127.0.0.1", 8080), MyServer)
-    server_thread = threading.Thread(target=web_server.serve_forever, daemon=True)
+    webServer = HTTPServer(("127.0.0.1", 8080), MyServer)
+    server_thread = threading.Thread(target=webServer.serve_forever, daemon=True)
     server_thread.start()
     time.sleep(0.3)
     yield
